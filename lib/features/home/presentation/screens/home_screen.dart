@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import '../../../../core/ai/model_manager/model_download_service.dart';
 import '../../../../core/services/recording_storage_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../player/presentation/screens/player_screen.dart';
 import '../../../recording/presentation/screens/recording_screen.dart';
+import '../../../settings/presentation/screens/model_hub_screen.dart';
 import '../../domain/models/recording_summary.dart';
 import '../view_models/home_view_model.dart';
 import '../widgets/hero_quick_record_card.dart';
@@ -31,6 +35,16 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _viewModel = widget.viewModel ?? HomeViewModel();
+    _checkAndAutoDownloadInitialModels();
+  }
+
+  Future<void> _checkAndAutoDownloadInitialModels() async {
+    try {
+      final ready = await ModelDownloadService.instance.areCoreModelsInstalled();
+      if (!ready && (Platform.isAndroid || Platform.isIOS)) {
+        unawaited(ModelDownloadService.instance.downloadEssentialCorePack());
+      }
+    } catch (_) {}
   }
 
   @override
@@ -295,21 +309,143 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           ],
                         ),
-                        IconButton.filledTonal(
-                          onPressed: _viewModel.loadRecordings,
-                          tooltip: 'Refresh Recordings',
-                          icon: const Icon(Icons.refresh_rounded),
-                          style: IconButton.styleFrom(
-                            backgroundColor: isDark
-                                ? AppColors.surfaceContainerDark
-                                : AppColors.surfaceContainerLight,
-                            foregroundColor: isDark
-                                ? AppColors.textPrimaryDark
-                                : AppColors.textPrimaryLight,
-                          ),
+                        Row(
+                          children: [
+                            IconButton.filledTonal(
+                              onPressed: () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) => const ModelHubScreen(),
+                                  ),
+                                );
+                              },
+                              tooltip: 'AI Model Library (GitHub & HuggingFace)',
+                              icon: const Icon(Icons.hub_rounded),
+                              style: IconButton.styleFrom(
+                                backgroundColor: isDark
+                                    ? AppColors.surfaceContainerDark
+                                    : AppColors.surfaceContainerLight,
+                                foregroundColor: AppColors.accent,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            IconButton.filledTonal(
+                              onPressed: _viewModel.loadRecordings,
+                              tooltip: 'Refresh Recordings',
+                              icon: const Icon(Icons.refresh_rounded),
+                              style: IconButton.styleFrom(
+                                backgroundColor: isDark
+                                    ? AppColors.surfaceContainerDark
+                                    : AppColors.surfaceContainerLight,
+                                foregroundColor: isDark
+                                    ? AppColors.textPrimaryDark
+                                    : AppColors.textPrimaryLight,
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
+                  ),
+                ),
+
+                // Live AI Model Auto-Download Banner (shown during initial setup or model download)
+                SliverToBoxAdapter(
+                  child: ListenableBuilder(
+                    listenable: ModelDownloadService.instance,
+                    builder: (context, _) {
+                      final modelSvc = ModelDownloadService.instance;
+                      if (!modelSvc.isBatchDownloadingCore &&
+                          !modelSvc.models.any((m) => m.isDownloading)) {
+                        return const SizedBox.shrink();
+                      }
+                      final progress = modelSvc.isBatchDownloadingCore
+                          ? modelSvc.coreSetupProgress
+                          : (modelSvc.models
+                                  .firstWhere(
+                                    (m) => m.isDownloading,
+                                    orElse: () => modelSvc.models.first,
+                                  )
+                                  .downloadProgress);
+                      final status = modelSvc.isBatchDownloadingCore
+                          ? modelSvc.coreSetupStatus
+                          : (modelSvc.models
+                                  .firstWhere(
+                                    (m) => m.isDownloading,
+                                    orElse: () => modelSvc.models.first,
+                                  )
+                                  .statusMessage ??
+                              'Downloading AI Model...');
+
+                      return Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: isDark
+                                ? AppColors.surfaceContainerDark
+                                : AppColors.surfaceContainerLight,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: AppColors.accent.withValues(alpha: 0.4),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      valueColor: AlwaysStoppedAnimation<Color>(
+                                        AppColors.accent,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      status,
+                                      style:
+                                          theme.textTheme.labelSmall?.copyWith(
+                                        fontWeight: FontWeight.w700,
+                                        color: AppColors.accent,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  Text(
+                                    '${(progress * 100).toInt()}%',
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(6),
+                                child: LinearProgressIndicator(
+                                  value: progress,
+                                  minHeight: 5,
+                                  backgroundColor: isDark
+                                      ? AppColors.borderDark
+                                      : AppColors.borderLight,
+                                  valueColor:
+                                      const AlwaysStoppedAnimation<Color>(
+                                    AppColors.accent,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
 

@@ -4,8 +4,12 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import '../../database/recording_repository.dart';
+import '../../services/app_preferences_service.dart';
+import '../../services/recording_storage_service.dart';
 import '../../../features/home/domain/models/recording_summary.dart';
 import '../../../features/player/domain/models/transcript_segment.dart';
+import '../asr/asr_engine.dart';
+import '../transcription_worker.dart';
 import 'ambient_vad_isolate.dart';
 import 'battery_optimization_policy.dart';
 import 'speech_state_machine.dart';
@@ -150,26 +154,46 @@ class AmbientMonitoringService {
     _ambientStateController.add(false);
   }
 
-  /// Automatically persists completed speech segment to local vault and database.
+  /// Automatically persists completed speech segment to local vault and database,
+  /// and runs real-time ASR transcription on the isolated speech segment.
   Future<void> _persistSpeechSegment(SpeechSegment segment) async {
     try {
-      final docsDir = await getApplicationDocumentsDirectory();
-      final vaultDir = Directory('${docsDir.path}/vault');
-      if (!await vaultDir.exists()) {
-        await vaultDir.create(recursive: true);
+      String recordingsPath;
+      try {
+        final dir =
+            await RecordingStorageService.instance.getRecordingsDirectory();
+        recordingsPath = dir.path;
+      } catch (_) {
+        final docsDir = await getApplicationDocumentsDirectory();
+        final vaultDir = Directory('${docsDir.path}/vault');
+        if (!await vaultDir.exists()) {
+          await vaultDir.create(recursive: true);
+        }
+        recordingsPath = vaultDir.path;
       }
 
-      final id = 'amb_${DateTime.now().millisecondsSinceEpoch}';
-      final filePath = '${vaultDir.path}/$id.wav';
+      final now = DateTime.now();
+      final id = 'amb_${now.millisecondsSinceEpoch}';
+      final fileName = RecordingStorageService.instance.generateFileName(
+        category: 'Ambient',
+        timestamp: now,
+        formatExtension: 'wav',
+      );
+      final filePath = '$recordingsPath${Platform.pathSeparator}$fileName';
       final file = File(filePath);
       await file.writeAsBytes(segment.wavBytes, flush: true);
 
+      final title =
+          'Ambient H24 ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+      final durationSec =
+          segment.duration.inSeconds > 0 ? segment.duration.inSeconds : 1;
+
       final summary = RecordingSummary(
         id: id,
-        title: 'Ambient Note ${DateTime.now().hour.toString().padLeft(2, '0')}:${DateTime.now().minute.toString().padLeft(2, '0')}',
+        title: title,
         createdAt: segment.startTimestamp,
-        durationSeconds: segment.duration.inSeconds > 0 ? segment.duration.inSeconds : 1,
-        transcriptSnippet: 'Ambient voice capture ready for on-device transcription.',
+        durationSeconds: durationSec,
+        transcriptSnippet: 'Transcribing H24 ambient voice capture...',
         speakers: const ['Speaker 1'],
         tags: const ['#Ambient', '#VoiceEar'],
         isFavorite: false,
@@ -188,6 +212,30 @@ class AmbientMonitoringService {
       await _repository.saveRecordingWithSegments(
         recording: summary,
         segments: [transcriptSegment],
+      );
+
+      // Trigger real ASR transcription in background worker
+      final lang = AppPreferencesService.instance.primaryLanguage;
+      final resolvedLang = lang == 'auto' ? 'auto' : lang;
+      final coordinator = TranscriptionWorkerCoordinator(repository: _repository);
+      unawaited(
+        coordinator
+            .transcribe(
+              request: TranscriptionWorkerRequest(
+                recordingId: id,
+                audioFilePath: filePath,
+                modelType: resolvedLang == 'km'
+                    ? AsrModelType.metaMmsKhmer
+                    : AsrModelType.whisperCppSmall,
+                language: resolvedLang,
+                title: title,
+                tags: const ['#Ambient', '#VoiceEar'],
+                fallbackDurationSeconds: durationSec,
+                createdAtMs: segment.startTimestamp.millisecondsSinceEpoch,
+              ),
+            )
+            .then<void>((_) {}, onError: (_) {})
+            .whenComplete(coordinator.dispose),
       );
     } catch (e) {
       // Avoid failing ambient ear on background file IO warning

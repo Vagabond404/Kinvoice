@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../../../../core/ai/model_manager/model_download_service.dart';
 import '../../../../core/database/recording_repository.dart';
 import '../../../../core/ml/asr/asr_engine.dart';
 import '../../../../core/ml/transcription_worker.dart';
@@ -127,7 +128,18 @@ class _SaveRecordingDialogState extends State<SaveRecordingDialog> {
   late final AppPreferencesService _preferencesService;
 
   late String _selectedCategory;
+  late String _selectedModelId;
   bool _isProcessing = false;
+
+  static const Map<String, String> _asrModelLabels = {
+    'whisper_tiny': 'Whisper Tiny Multilingual (FR / EN / KM)',
+    'whisper_base': 'Whisper Base Multilingual (High Accuracy)',
+    'whisper_small': 'Whisper Small Studio Pro (99 Languages)',
+    'moonshine_tiny': 'Moonshine Tiny (5x Real-Time EN)',
+    'moonshine_base': 'Moonshine Base (4-bit ONNX)',
+    'sense_voice': 'SenseVoice Multilingual + Emotion',
+    'meta_mms_khmer': 'Meta MMS Conformer (Khmer 🇰🇭)',
+  };
 
   @override
   void initState() {
@@ -147,6 +159,10 @@ class _SaveRecordingDialogState extends State<SaveRecordingDialog> {
         SaveRecordingDialog.categories.contains(widget.initialCategory)
             ? widget.initialCategory
             : SaveRecordingDialog.categories.first;
+    final currentActive = ModelDownloadService.instance.activeAsrModelId;
+    _selectedModelId = _asrModelLabels.containsKey(currentActive)
+        ? currentActive
+        : 'whisper_tiny';
   }
 
   @override
@@ -240,10 +256,15 @@ class _SaveRecordingDialogState extends State<SaveRecordingDialog> {
     // 3. Trigger background worker isolate to run ASR transcription
     if (autoTranscribe) {
       final lang = _preferencesService.primaryLanguage;
-      final resolvedLang = lang == 'auto' ? 'en' : lang;
-      final modelType = resolvedLang == 'km'
-          ? AsrModelType.metaMmsKhmer
-          : AsrModelType.moonshineBase;
+      final resolvedLang = lang == 'auto' ? 'auto' : lang;
+      final modelType =
+          (resolvedLang == 'km' || _selectedModelId == 'meta_mms_khmer')
+              ? AsrModelType.metaMmsKhmer
+              : (_selectedModelId.startsWith('whisper')
+                  ? AsrModelType.whisperCppSmall
+                  : AsrModelType.moonshineBase);
+
+      await ModelDownloadService.instance.setActiveAsrModel(_selectedModelId);
 
       final coordinator = widget.transcriptionCoordinator ??
           TranscriptionWorkerCoordinator(repository: _repository);
@@ -252,6 +273,7 @@ class _SaveRecordingDialogState extends State<SaveRecordingDialog> {
         recordingId: recordingId,
         audioFilePath: savedFilePath,
         modelType: modelType,
+        preferredModelId: _selectedModelId,
         language: resolvedLang,
         title: finalTitle,
         tags: [categoryTag],
@@ -460,7 +482,7 @@ class _SaveRecordingDialogState extends State<SaveRecordingDialog> {
               ),
               const SizedBox(height: 18),
 
-              // File Metadata Card (Duration, File Size, Target Directory)
+              // File Metadata Card (Duration, File Size, Target Directory, AI Model)
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(14),
@@ -501,6 +523,46 @@ class _SaveRecordingDialogState extends State<SaveRecordingDialog> {
                             color: Colors.white,
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.psychology_rounded,
+                          size: 16,
+                          color: AppColors.accent,
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<String>(
+                              value: _selectedModelId,
+                              isDense: true,
+                              isExpanded: true,
+                              dropdownColor: AppColors.surfaceContainerDark,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              items: _asrModelLabels.entries.map((entry) {
+                                return DropdownMenuItem<String>(
+                                  value: entry.key,
+                                  child: Text(
+                                    entry.value,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                );
+                              }).toList(),
+                              onChanged: (val) {
+                                if (val != null) {
+                                  setState(() => _selectedModelId = val);
+                                }
+                              },
+                            ),
                           ),
                         ),
                       ],

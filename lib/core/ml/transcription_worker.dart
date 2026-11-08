@@ -6,11 +6,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../../features/home/domain/models/recording_summary.dart';
 import '../../features/player/domain/models/transcript_segment.dart';
+import '../ai/model_manager/model_download_service.dart';
 import '../ai/vector_search/vector_store.dart';
 import '../audio/wav_header_helper.dart';
 import '../database/recording_repository.dart';
+import '../services/app_preferences_service.dart';
+import '../services/secure_storage_service.dart';
 import '../utils/result.dart';
 import 'asr/asr_engine.dart';
+import 'asr/sherpa_onnx_engine.dart';
 import 'diarization/diarization_engine.dart';
 import 'vad/silero_vad_engine.dart';
 import 'vad/speech_state_machine.dart';
@@ -41,6 +45,11 @@ class TranscriptionWorkerRequest {
     this.fallbackDurationSeconds,
     this.createdAtMs,
     this.persistInIsolate = true,
+    this.modelsRootPath,
+    this.preferredModelId,
+    this.vadThreshold = 0.5,
+    this.cloudApiKey,
+    this.cloudProvider,
   });
 
   final String recordingId;
@@ -55,9 +64,19 @@ class TranscriptionWorkerRequest {
   final int? fallbackDurationSeconds;
   final int? createdAtMs;
   final bool persistInIsolate;
+  final String? modelsRootPath;
+  final String? preferredModelId;
+  final double vadThreshold;
+  final String? cloudApiKey;
+  final String? cloudProvider;
 
   TranscriptionWorkerRequest copyWith({
     bool? persistInIsolate,
+    String? modelsRootPath,
+    String? preferredModelId,
+    double? vadThreshold,
+    String? cloudApiKey,
+    String? cloudProvider,
   }) {
     return TranscriptionWorkerRequest(
       recordingId: recordingId,
@@ -70,6 +89,11 @@ class TranscriptionWorkerRequest {
       fallbackDurationSeconds: fallbackDurationSeconds,
       createdAtMs: createdAtMs,
       persistInIsolate: persistInIsolate ?? this.persistInIsolate,
+      modelsRootPath: modelsRootPath ?? this.modelsRootPath,
+      preferredModelId: preferredModelId ?? this.preferredModelId,
+      vadThreshold: vadThreshold ?? this.vadThreshold,
+      cloudApiKey: cloudApiKey ?? this.cloudApiKey,
+      cloudProvider: cloudProvider ?? this.cloudProvider,
     );
   }
 }
@@ -196,99 +220,157 @@ class TranscriptionPipeline {
       emit(0.15, TranscriptionStage.readingAudio,
           'Audio loaded (${durationSeconds}s, 16kHz PCM).');
 
-      // ---------------------------------------------------------------------
-      // 2. Silero VAD Voice Segmentation (15% - 35%)
-      // ---------------------------------------------------------------------
-      emit(0.20, TranscriptionStage.vadSegmentation,
-          'Running Silero VAD v5 speech boundary detection...');
+      final transcriptSegments = <TranscriptSegment>[];
+      final detectedSpeakers = <String>{};
 
-      final stateMachine = SpeechStateMachine();
-      final speechSegments = <SpeechSegment>[];
-      const frameBytes = SileroVadEngine.frameBytes; // 1024 bytes (512 samples)
-
-      for (int i = 0; i + frameBytes <= pcmBytes.length; i += frameBytes) {
-        final frame = pcmBytes.sublist(i, i + frameBytes);
-        final prob = _vadEngine.processPcmBytes(frame);
-        final segment = stateMachine.processFrame(
-          pcmChunk: frame,
-          voiceProbability: prob,
+      // ---------------------------------------------------------------------
+      // Native Sherpa-ONNX Pipeline (Silero VAD + Pyannote/ERes2Net + ONNX ASR)
+      // or Cloud Whisper API (Groq / OpenAI) when no mock AsrEngine is injected
+      // ---------------------------------------------------------------------
+      List<TranscriptSegment>? nativeOrCloudSegments;
+      if (_asrEngine == null && request.modelsRootPath != null) {
+        nativeOrCloudSegments = SherpaOnnxEngine.runNativePipeline(
+          recordingId: request.recordingId,
+          pcmBytes: pcmBytes,
+          modelsRootPath: request.modelsRootPath!,
+          preferredModelId:
+              request.preferredModelId ?? _defaultModelIdForType(request.modelType),
+          language: request.language,
+          vadThreshold: request.vadThreshold,
+          sampleRate: 16000,
+          onProgress: (prog, msg) {
+            final stage = prog < 0.45
+                ? TranscriptionStage.speakerDiarization
+                : (prog < 0.60
+                    ? TranscriptionStage.vadSegmentation
+                    : TranscriptionStage.speechRecognition);
+            emit(prog, stage, msg);
+          },
         );
-        if (segment != null) {
-          speechSegments.add(segment);
+      }
+
+      if (nativeOrCloudSegments == null &&
+          _asrEngine == null &&
+          request.cloudApiKey != null &&
+          request.cloudApiKey!.trim().isNotEmpty) {
+        emit(
+          0.55,
+          TranscriptionStage.speechRecognition,
+          'Transcribing audio via ${request.cloudProvider?.toUpperCase() ?? "Cloud"} Whisper...',
+        );
+        nativeOrCloudSegments =
+            await SherpaOnnxEngine.tryCloudWhisperTranscription(
+          recordingId: request.recordingId,
+          pcmBytes: pcmBytes,
+          apiKey: request.cloudApiKey!,
+          provider: request.cloudProvider ?? 'groq',
+          language: request.language,
+          sampleRate: 16000,
+        );
+      }
+
+      if (nativeOrCloudSegments != null && nativeOrCloudSegments.isNotEmpty) {
+        for (final seg in nativeOrCloudSegments) {
+          detectedSpeakers.add(seg.speakerId);
+          transcriptSegments.add(seg);
+        }
+        emit(
+          0.85,
+          TranscriptionStage.speechRecognition,
+          'Native ONNX ASR & Diarization complete (${transcriptSegments.length} segments).',
+        );
+      } else {
+        // ---------------------------------------------------------------------
+        // 2. Silero VAD Voice Segmentation (15% - 35%)
+        // ---------------------------------------------------------------------
+        emit(0.20, TranscriptionStage.vadSegmentation,
+            'Running Silero VAD v5 speech boundary detection...');
+
+        final stateMachine = SpeechStateMachine();
+        final speechSegments = <SpeechSegment>[];
+        const frameBytes = SileroVadEngine.frameBytes; // 1024 bytes (512 samples)
+
+        for (int i = 0; i + frameBytes <= pcmBytes.length; i += frameBytes) {
+          final frame = pcmBytes.sublist(i, i + frameBytes);
+          final prob = _vadEngine.processPcmBytes(frame);
+          final segment = stateMachine.processFrame(
+            pcmChunk: frame,
+            voiceProbability: prob,
+          );
+          if (segment != null) {
+            speechSegments.add(segment);
+          }
+        }
+
+        final flushed = stateMachine.flush();
+        if (flushed != null) {
+          speechSegments.add(flushed);
+        }
+
+        emit(0.35, TranscriptionStage.vadSegmentation,
+            'VAD complete: detected ${speechSegments.length} active speech sections.');
+
+        // ---------------------------------------------------------------------
+        // 3. ECAPA-TDNN Speaker Diarization (35% - 60%)
+        // ---------------------------------------------------------------------
+        emit(0.40, TranscriptionStage.speakerDiarization,
+            'Extracting 192-dim ECAPA-TDNN speaker embeddings...');
+
+        final embeddings = await _diarizationEngine.extractEmbeddings(
+          pcmBytes,
+          sampleRate: 16000,
+        );
+
+        emit(0.55, TranscriptionStage.speakerDiarization,
+            'Extracted ${embeddings.length} speaker embeddings. Clustering via pure Dart cosine similarity...');
+
+        // ---------------------------------------------------------------------
+        // 4. Speech-to-Text Transcription & Alignment (60% - 85%)
+        // ---------------------------------------------------------------------
+        emit(0.60, TranscriptionStage.speechRecognition,
+            'Initializing ${request.modelType.name} ASR engine...');
+
+        final asr = _asrEngine ??
+            AsrEngineFactory.createEngine(modelType: request.modelType);
+
+        final rawAsrSegments = await asr.transcribe(
+          pcmBytes: pcmBytes,
+          sampleRate: 16000,
+          language: request.language,
+        );
+
+        emit(0.75, TranscriptionStage.speechRecognition,
+            'Aligning speaker diarization clusters with transcript segments...');
+
+        final alignedAsrSegments = await _diarizationEngine.diarizeAndAlign(
+          pcmBytes: pcmBytes,
+          segments: rawAsrSegments,
+          sampleRate: 16000,
+        );
+
+        emit(0.85, TranscriptionStage.speechRecognition,
+            'ASR & Diarization complete (${alignedAsrSegments.length} segments).');
+
+        for (int i = 0; i < alignedAsrSegments.length; i++) {
+          final seg = alignedAsrSegments[i];
+          final speaker = seg.speakerId ?? 'Speaker 1';
+          detectedSpeakers.add(speaker);
+
+          transcriptSegments.add(
+            seg.toTranscriptSegment(
+              id: '${request.recordingId}_seg_$i',
+              recordingId: request.recordingId,
+              defaultSpeaker: speaker,
+            ),
+          );
         }
       }
-
-      final flushed = stateMachine.flush();
-      if (flushed != null) {
-        speechSegments.add(flushed);
-      }
-
-      emit(0.35, TranscriptionStage.vadSegmentation,
-          'VAD complete: detected ${speechSegments.length} active speech sections.');
-
-      // ---------------------------------------------------------------------
-      // 3. ECAPA-TDNN Speaker Diarization (35% - 60%)
-      // ---------------------------------------------------------------------
-      emit(0.40, TranscriptionStage.speakerDiarization,
-          'Extracting 192-dim ECAPA-TDNN speaker embeddings...');
-
-      final embeddings = await _diarizationEngine.extractEmbeddings(
-        pcmBytes,
-        sampleRate: 16000,
-      );
-
-      emit(0.55, TranscriptionStage.speakerDiarization,
-          'Extracted ${embeddings.length} speaker embeddings. Clustering via pure Dart cosine similarity...');
-
-      // ---------------------------------------------------------------------
-      // 4. Speech-to-Text Transcription & Alignment (60% - 85%)
-      // ---------------------------------------------------------------------
-      emit(0.60, TranscriptionStage.speechRecognition,
-          'Initializing ${request.modelType.name} ASR engine...');
-
-      final asr = _asrEngine ??
-          AsrEngineFactory.createEngine(modelType: request.modelType);
-
-      final rawAsrSegments = await asr.transcribe(
-        pcmBytes: pcmBytes,
-        sampleRate: 16000,
-        language: request.language,
-      );
-
-      emit(0.75, TranscriptionStage.speechRecognition,
-          'Aligning speaker diarization clusters with transcript segments...');
-
-      final alignedAsrSegments = await _diarizationEngine.diarizeAndAlign(
-        pcmBytes: pcmBytes,
-        segments: rawAsrSegments,
-        sampleRate: 16000,
-      );
-
-      emit(0.85, TranscriptionStage.speechRecognition,
-          'ASR & Diarization complete (${alignedAsrSegments.length} segments).');
 
       // ---------------------------------------------------------------------
       // 5. Database Persistence (85% - 100%)
       // ---------------------------------------------------------------------
       emit(0.90, TranscriptionStage.savingDatabase,
           'Saving transcript and speaker attribution into SQLite FTS5...');
-
-      final transcriptSegments = <TranscriptSegment>[];
-      final detectedSpeakers = <String>{};
-
-      for (int i = 0; i < alignedAsrSegments.length; i++) {
-        final seg = alignedAsrSegments[i];
-        final speaker = seg.speakerId ?? 'Speaker 1';
-        detectedSpeakers.add(speaker);
-
-        transcriptSegments.add(
-          seg.toTranscriptSegment(
-            id: '${request.recordingId}_seg_$i',
-            recordingId: request.recordingId,
-            defaultSpeaker: speaker,
-          ),
-        );
-      }
 
       if (transcriptSegments.isEmpty) {
         detectedSpeakers.add('Speaker 1');
@@ -386,6 +468,17 @@ class TranscriptionPipeline {
     if (words.length <= 4) return snippet;
     return '${words.take(4).join(' ')}...';
   }
+
+  static String _defaultModelIdForType(AsrModelType type) {
+    switch (type) {
+      case AsrModelType.moonshineBase:
+        return 'moonshine_base';
+      case AsrModelType.whisperCppSmall:
+        return 'whisper_small';
+      case AsrModelType.metaMmsKhmer:
+        return 'meta_mms_khmer';
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +534,32 @@ class TranscriptionWorkerCoordinator {
       );
     }
 
+    // Resolve local ONNX models directory and BYOK cloud fallback credentials on main isolate
+    String? resolvedModelsRoot = request.modelsRootPath;
+    String? resolvedModelId = request.preferredModelId;
+    String? resolvedApiKey = request.cloudApiKey;
+    String? resolvedProvider = request.cloudProvider;
+    final resolvedVadThreshold = AppPreferencesService.instance.vadSensitivity;
+
+    try {
+      if (resolvedModelsRoot == null) {
+        final dir = await ModelDownloadService.instance.getModelsRootDirectory();
+        resolvedModelsRoot = dir.path;
+      }
+      resolvedModelId ??= ModelDownloadService.instance.activeAsrModelId;
+      final secure = SecureStorageService();
+      resolvedApiKey ??= await secure.getApiKey();
+      resolvedProvider ??= await secure.getProvider();
+    } catch (_) {}
+
+    final enrichedRequest = request.copyWith(
+      modelsRootPath: resolvedModelsRoot,
+      preferredModelId: resolvedModelId,
+      vadThreshold: resolvedVadThreshold,
+      cloudApiKey: resolvedApiKey,
+      cloudProvider: resolvedProvider,
+    );
+
     // Spawn background worker Isolate for CPU-intensive VAD, Diarization, and ASR
     final receivePort = ReceivePort();
     final rootToken = ServicesBinding.rootIsolateToken;
@@ -465,7 +584,7 @@ class TranscriptionWorkerCoordinator {
         );
         try {
           return await pipeline.execute(
-            request: request,
+            request: enrichedRequest,
             onProgress: (p) => _progressController.add(p),
           );
         } finally {
@@ -480,7 +599,7 @@ class TranscriptionWorkerCoordinator {
       );
       try {
         return await pipeline.execute(
-          request: request,
+          request: enrichedRequest,
           onProgress: (p) => _progressController.add(p),
         );
       } finally {
@@ -489,7 +608,7 @@ class TranscriptionWorkerCoordinator {
     }
 
     SendPort? workerSendPort;
-    final isolateRequest = request.copyWith(persistInIsolate: false);
+    final isolateRequest = enrichedRequest.copyWith(persistInIsolate: false);
 
     receivePort.listen((message) async {
       if (message is SendPort) {

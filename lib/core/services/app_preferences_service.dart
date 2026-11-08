@@ -140,6 +140,15 @@ class AppPreferencesService extends ChangeNotifier {
     notifyListeners();
   }
 
+  String get activeAsrModel {
+    return _getString(StorageKeys.selectedAsrModel) ?? 'whisper_tiny';
+  }
+
+  Future<void> setActiveAsrModel(String modelId) async {
+    await _setString(StorageKeys.selectedAsrModel, modelId);
+    notifyListeners();
+  }
+
   // ---------------------------------------------------------------------------
   // Internal storage helpers with automatic fallback
   // ---------------------------------------------------------------------------

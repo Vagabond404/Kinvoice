@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" fill="none">
+  <defs>
+    <!-- Background Gradient: Electric Violet into Deep Royal Indigo -->
+    <linearGradient id="kinvoiceAppBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366F1" />
+      <stop offset="45%" stop-color="#4F46E5" />
+      <stop offset="100%" stop-color="#312E81" />
+    </linearGradient>
+
+    <!-- Subtle Highlight Border -->
+    <linearGradient id="subtleEdge" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.2" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.03" />
+    </linearGradient>
+  </defs>
+
+  <!-- Squircle Canvas: Fills the image with modern rounded corners (Transparent outside) -->
+  <rect x="0" y="0" width="1024" height="1024" rx="192" fill="url(#kinvoiceAppBg)" />
+  <rect x="1" y="1" width="1022" height="1022" rx="191" stroke="url(#subtleEdge)" stroke-width="2" />
+
+  <!-- Acoustic Waves & Studio Microphone -->
+  <g id="IconGlyph">
+    <!-- Left Soundwave Bars -->
+    <rect x="164" y="436" width="44" height="152" rx="22" fill="#FFFFFF" opacity="0.45" />
+    <rect x="240" y="360" width="44" height="304" rx="22" fill="#FFFFFF" opacity="0.75" />
+    <rect x="316" y="296" width="44" height="432" rx="22" fill="#FFFFFF" opacity="0.95" />
+
+    <!-- Center Studio Microphone -->
+    <!-- Main Capsule -->
+    <rect x="436" y="216" width="152" height="308" rx="76" fill="#FFFFFF" />
+
+    <!-- Active Ambient Indicator Dot (Emerald Green) -->
+    <circle cx="512" cy="296" r="22" fill="#10B981" />
+
+    <!-- U-Cradle Stand -->
+    <path d="M 386,410 C 386,584 638,584 638,410" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" fill="none" />
+
+    <!-- Stand Stem -->
+    <line x1="512" y1="584" x2="512" y2="712" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" />
+
+    <!-- Stand Base -->
+    <line x1="404" y1="712" x2="620" y2="712" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" />
+
+    <!-- Right Soundwave Bars -->
+    <rect x="664" y="296" width="44" height="432" rx="22" fill="#FFFFFF" opacity="0.95" />
+    <rect x="740" y="360" width="44" height="304" rx="22" fill="#FFFFFF" opacity="0.75" />
+    <rect x="816" y="436" width="44" height="152" rx="22" fill="#FFFFFF" opacity="0.45" />
+  </g>
+</svg>
