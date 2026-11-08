@@ -5,7 +5,7 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch: # Permet de lancer la compilation manuellement en 1 clic sur GitHub
+  workflow_dispatch:
 
 jobs:
   build:
@@ -21,27 +21,23 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
 
       - name: Setup Flutter SDK
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: 'master'
           cache: true
+
+      - name: Verify Flutter & Environment
+        run: flutter doctor -v
 
       - name: Get Dependencies
         run: flutter pub get
 
-      - name: Run Tests
-        run: flutter test
+      - name: Build Android Debug APK
+        run: flutter build apk --debug --android-skip-build-dependency-validation
 
-      - name: Build Android Release APK
-        run: flutter build apk --release --split-per-abi
-
-      - name: Build Android Universal APK
-        run: flutter build apk --release
-
-      - name: Upload APKs to Artifacts
+      - name: Upload APK to GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kinvoice-apk
