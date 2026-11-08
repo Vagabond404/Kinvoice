@@ -46,6 +46,7 @@ class AudioRecorderService {
   bool get isRecording => _isRecording;
   bool get isPaused => _isPaused;
   Duration get currentDuration => _currentDuration;
+  String? get activeOutputPath => _activeOutputPath;
 
   /// Starts a new recording session at 16kHz Mono PCM.
   Future<Result<void, AudioCaptureFailure>> startRecording({

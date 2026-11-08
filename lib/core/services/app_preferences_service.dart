@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../constants/storage_keys.dart';
 
@@ -146,6 +146,37 @@ class AppPreferencesService extends ChangeNotifier {
 
   Future<void> setActiveAsrModel(String modelId) async {
     await _setString(StorageKeys.selectedAsrModel, modelId);
+    notifyListeners();
+  }
+
+  /// Whether the user has completed the 3-step first-launch onboarding flow.
+  bool get hasCompletedOnboarding {
+    return _getBool(StorageKeys.hasCompletedOnboarding) ?? false;
+  }
+
+  Future<void> setHasCompletedOnboarding(bool completed) async {
+    await _setBool(StorageKeys.hasCompletedOnboarding, completed);
+    notifyListeners();
+  }
+
+  /// User theme mode code: `'system'`, `'dark'`, or `'light'`.
+  String get themeModeCode {
+    return _getString(StorageKeys.themeMode) ?? 'system';
+  }
+
+  ThemeMode get themeMode {
+    switch (themeModeCode) {
+      case 'dark':
+        return ThemeMode.dark;
+      case 'light':
+        return ThemeMode.light;
+      default:
+        return ThemeMode.system;
+    }
+  }
+
+  Future<void> setThemeModeCode(String code) async {
+    await _setString(StorageKeys.themeMode, code);
     notifyListeners();
   }
 

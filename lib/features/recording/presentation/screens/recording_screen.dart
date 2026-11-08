@@ -4,13 +4,15 @@ import 'package:flutter/material.dart';
 import '../../../../core/audio/audio_recorder_service.dart';
 import '../../../../core/database/recording_repository.dart';
 import '../../../../core/services/app_preferences_service.dart';
+import '../../../../core/services/recording_notification_service.dart';
 import '../../../../core/services/recording_storage_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../widgets/live_waveform_painter.dart';
 import '../widgets/save_recording_dialog.dart';
 
 /// Full-screen dark mode studio recording modal with live waveform visualizer,
-/// digital timer, active speaker/VAD indicator, and recording controls.
+/// digital timer, active speaker/VAD indicator, interactive Android ongoing
+/// notification synchronization, crash recovery journal, and edge-case hardening.
 class RecordingScreen extends StatefulWidget {
   const RecordingScreen({
     super.key,
@@ -18,6 +20,7 @@ class RecordingScreen extends StatefulWidget {
     this.storageService,
     this.repository,
     this.preferencesService,
+    this.notificationService,
     this.initialTitle = 'New Recording',
   });
 
@@ -25,32 +28,42 @@ class RecordingScreen extends StatefulWidget {
   final RecordingStorageService? storageService;
   final RecordingRepository? repository;
   final AppPreferencesService? preferencesService;
+  final RecordingNotificationService? notificationService;
   final String initialTitle;
 
   @override
-  State<RecordingScreen> createState() => _RecordingScreenState();
+  State<RecordingScreen> createState() => RecordingScreenState();
 }
 
-class _RecordingScreenState extends State<RecordingScreen>
-    with SingleTickerProviderStateMixin {
+class RecordingScreenState extends State<RecordingScreen>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AudioRecorderService _recorderService;
+  late final RecordingNotificationService _notificationService;
   late final AnimationController _waveAnimationController;
   late final TextEditingController _titleController;
 
   StreamSubscription<double>? _amplitudeSub;
   StreamSubscription<bool>? _voiceSub;
   StreamSubscription<Duration>? _durationSub;
+  StreamSubscription<NotificationRecordingAction>? _notifActionSub;
 
   double _currentAmplitude = 0.05;
   double _smoothedAmplitude = 0.05;
   bool _isVoiceDetected = false;
   Duration _elapsed = Duration.zero;
+  int _lastNotifiedSecond = -1;
   bool _isSaving = false;
+  bool _permissionDenied = false;
+  bool _storageExhausted = false;
+  DateTime _sessionStartedAt = DateTime.now();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _recorderService = widget.recorderService ?? AudioRecorderService();
+    _notificationService =
+        widget.notificationService ?? RecordingNotificationService.instance;
     _titleController = TextEditingController(text: widget.initialTitle);
 
     // Continuous wave motion controller
@@ -60,21 +73,87 @@ class _RecordingScreenState extends State<RecordingScreen>
     )..repeat();
 
     _waveAnimationController.addListener(() {
-      // Smooth amplitude dampening for fluid animations
+      if (!mounted) return;
       setState(() {
         _smoothedAmplitude =
             _smoothedAmplitude + (_currentAmplitude - _smoothedAmplitude) * 0.15;
       });
     });
 
+    _notifActionSub = _notificationService.actionStream.listen((action) {
+      if (!mounted) return;
+      if (action == NotificationRecordingAction.pauseResume) {
+        _togglePauseResume();
+      } else if (action == NotificationRecordingAction.stopAndSave) {
+        _finishAndSave();
+      }
+    });
+
     _startRecordingSession();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Keep ongoing notification synced; if OS signals audio interruption or call,
+    // synchronize state and flush recovery journal.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _flushRecoveryJournal();
+    } else if (state == AppLifecycleState.resumed) {
+      _checkPendingNotificationActions();
+    }
+  }
+
+  /// Auto-pauses recording and preserves the current audio buffer when an incoming
+  /// phone call, alarm, or Bluetooth disconnection interrupts audio focus.
+  Future<void> handleAudioInterruption() async {
+    if (_recorderService.isRecording && !_recorderService.isPaused) {
+      await _recorderService.pauseRecording();
+      await _notificationService.updateRecordingNotification(
+        title: _titleController.text.trim().isEmpty
+            ? 'Voice Note'
+            : _titleController.text.trim(),
+        elapsed: _elapsed,
+        isPaused: true,
+      );
+      await _flushRecoveryJournal();
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _checkPendingNotificationActions() async {
+    final pendingAction =
+        await _notificationService.consumePendingNotificationAction();
+    if (!mounted || pendingAction == null) return;
+    if (pendingAction == NotificationRecordingAction.pauseResume) {
+      await _togglePauseResume();
+    } else if (pendingAction == NotificationRecordingAction.stopAndSave) {
+      await _finishAndSave();
+    }
+  }
+
   Future<void> _startRecordingSession() async {
+    _sessionStartedAt = DateTime.now();
+
+    // 1. Storage Exhaustion Guard
+    final hasSpace = await _notificationService.hasSufficientStorage();
+    if (!hasSpace) {
+      if (mounted) {
+        setState(() {
+          _storageExhausted = true;
+        });
+        _showStorageExhaustedDialog();
+      }
+      return;
+    }
+
     // Listen to live metrics
     _amplitudeSub = _recorderService.amplitudeStream.listen((rms) {
       if (mounted) {
-        _currentAmplitude = rms;
+        _currentAmplitude = rms.isNaN || rms.isInfinite ? 0.05 : rms;
       }
     });
 
@@ -91,21 +170,167 @@ class _RecordingScreenState extends State<RecordingScreen>
         setState(() {
           _elapsed = duration;
         });
+        final sec = duration.inSeconds;
+        if (sec != _lastNotifiedSecond) {
+          _lastNotifiedSecond = sec;
+          _notificationService.updateRecordingNotification(
+            title: _titleController.text.trim().isEmpty
+                ? 'Voice Note'
+                : _titleController.text.trim(),
+            elapsed: duration,
+            isPaused: _recorderService.isPaused,
+          );
+          if (sec > 0 && sec % 5 == 0) {
+            _flushRecoveryJournal();
+          }
+        }
       }
     });
 
     if (!_recorderService.isRecording) {
-      await _recorderService.startRecording();
+      final startResult = await _recorderService.startRecording();
+      if (!mounted) return;
+
+      startResult.fold(
+        onSuccess: (_) {
+          _notificationService.startRecordingNotification(
+            title: _titleController.text.trim().isEmpty
+                ? 'Voice Note'
+                : _titleController.text.trim(),
+          );
+          _flushRecoveryJournal();
+        },
+        onError: (failure) {
+          if (failure.message.toLowerCase().contains('permission')) {
+            setState(() {
+              _permissionDenied = true;
+            });
+            _showPermissionDeniedDialog();
+          }
+        },
+      );
+    } else {
+      await _notificationService.startRecordingNotification(
+        title: _titleController.text.trim(),
+      );
     }
+  }
+
+  Future<void> _flushRecoveryJournal() async {
+    final tempPath = _recorderService.activeOutputPath;
+    if (tempPath == null || tempPath.isEmpty) return;
+    await _notificationService.writeRecoveryJournal(
+      CrashRecoveryJournalEntry(
+        tempFilePath: tempPath,
+        title: _titleController.text.trim().isEmpty
+            ? 'Recovered Voice Note'
+            : _titleController.text.trim(),
+        category: 'General',
+        startedAtMs: _sessionStartedAt.millisecondsSinceEpoch,
+        elapsedSeconds: _elapsed.inSeconds,
+      ),
+    );
+  }
+
+  void _showPermissionDeniedDialog() {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceDark,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.mic_off_rounded, color: AppColors.recording),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Microphone Permission Required',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          'Kinvoice requires microphone access to capture and transcribe your voice notes locally on your device. Please enable Microphone permission in App Settings.',
+          style: TextStyle(color: AppColors.textSecondaryDark),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.accent,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _notificationService.openAppSettings();
+            },
+            icon: const Icon(Icons.settings_rounded, size: 18),
+            label: const Text('Open App Settings'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showStorageExhaustedDialog() {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceDark,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.disc_full_rounded, color: AppColors.warning),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Low Device Storage',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          'Your device has less than 50 MB of free storage remaining. Please free up disk space before starting a new long recording.',
+          style: TextStyle(color: AppColors.textSecondaryDark),
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.accent,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Understood'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _waveAnimationController.dispose();
     _titleController.dispose();
     _amplitudeSub?.cancel();
     _voiceSub?.cancel();
     _durationSub?.cancel();
+    _notifActionSub?.cancel();
     if (widget.recorderService == null) {
       _recorderService.dispose();
     }
@@ -125,7 +350,17 @@ class _RecordingScreenState extends State<RecordingScreen>
     } else {
       await _recorderService.pauseRecording();
     }
-    setState(() {});
+    await _notificationService.updateRecordingNotification(
+      title: _titleController.text.trim().isEmpty
+          ? 'Voice Note'
+          : _titleController.text.trim(),
+      elapsed: _elapsed,
+      isPaused: _recorderService.isPaused,
+    );
+    await _flushRecoveryJournal();
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _confirmCancel() async {
@@ -161,6 +396,8 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     if (shouldCancel == true && mounted) {
       await _recorderService.cancelRecording();
+      await _notificationService.stopRecordingNotification();
+      await _notificationService.clearRecoveryJournal();
       if (mounted) {
         Navigator.pop(context, null);
       }
@@ -178,6 +415,8 @@ class _RecordingScreenState extends State<RecordingScreen>
         ? _elapsed
         : _recorderService.currentDuration;
     final result = await _recorderService.stopRecording();
+    await _notificationService.stopRecordingNotification();
+    await _notificationService.clearRecoveryJournal();
 
     if (!mounted) return;
 
@@ -273,6 +512,51 @@ class _RecordingScreenState extends State<RecordingScreen>
                 ],
               ),
             ),
+
+            // Permission Denied / Storage Exhausted Warning Banner (if applicable)
+            if (_permissionDenied || _storageExhausted)
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: AppColors.recording.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: AppColors.recording),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _permissionDenied
+                            ? Icons.mic_off_rounded
+                            : Icons.disc_full_rounded,
+                        color: AppColors.recording,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          _permissionDenied
+                              ? 'Microphone permission denied. Tap Settings to enable.'
+                              : 'Low storage space (<50 MB available).',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      if (_permissionDenied)
+                        TextButton(
+                          onPressed: _notificationService.openAppSettings,
+                          child: const Text('Settings'),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
 
             // Recording Title
             Padding(

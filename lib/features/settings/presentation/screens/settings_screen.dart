@@ -199,6 +199,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             final vadThreshold = _prefs.sileroVadThreshold;
             final vadLabel = _prefs.vadSensitivityLabel;
             final batteryThrottle = _prefs.lowBatteryAutoThrottle;
+            final themeModeCode = _prefs.themeModeCode;
 
             return CustomScrollView(
               physics: const BouncingScrollPhysics(),
@@ -737,6 +738,74 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                           ),
                         ],
+                      ),
+                    ),
+                  ),
+                ),
+
+                // Section: Theme Mode
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 24, 20, 8),
+                    child: Text(
+                      'Theme Mode',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Card(
+                      child: RadioGroup<String>(
+                        groupValue: themeModeCode,
+                        onChanged: (val) {
+                          if (val != null) {
+                            _prefs.setThemeModeCode(val);
+                          }
+                        },
+                        child: const Column(
+                          children: [
+                            RadioListTile<String>(
+                              value: 'system',
+                              activeColor: AppColors.accent,
+                              title: Text(
+                                'System Default',
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                              subtitle: Text(
+                                'Automatically follows Android/iOS appearance',
+                              ),
+                            ),
+                            Divider(indent: 16, endIndent: 16),
+                            RadioListTile<String>(
+                              value: 'dark',
+                              activeColor: AppColors.accent,
+                              title: Text(
+                                'Pure Dark',
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                              subtitle: Text(
+                                'OLED studio obsidian palette (#0B0F19)',
+                              ),
+                            ),
+                            Divider(indent: 16, endIndent: 16),
+                            RadioListTile<String>(
+                              value: 'light',
+                              activeColor: AppColors.accent,
+                              title: Text(
+                                'Clean Light',
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                              subtitle: Text(
+                                'High-contrast daylight surface (#F8FAFC)',
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),

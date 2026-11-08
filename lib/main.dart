@@ -2,29 +2,68 @@ import 'package:flutter/material.dart';
 import 'core/services/app_preferences_service.dart';
 import 'core/theme/app_theme.dart';
 import 'features/home/presentation/screens/home_screen.dart';
+import 'features/onboarding/presentation/screens/onboarding_screen.dart';
 import 'features/search/presentation/screens/search_screen.dart';
 import 'features/settings/presentation/screens/settings_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppPreferencesService.instance.init();
-  runApp(const KinvoiceApp());
+  runApp(const KinvoiceApp(showOnboardingIfFirstLaunch: true));
 }
 
 /// Root application widget for Kinvoice.
-/// Configures Material 3 ThemeData with system-driven automatic Light & Dark switching.
-class KinvoiceApp extends StatelessWidget {
-  const KinvoiceApp({super.key});
+/// Configures Material 3 ThemeData with reactive Light, Dark (#0B0F19), & System
+/// theme switching and First-Launch Onboarding & Privacy Agreement.
+class KinvoiceApp extends StatefulWidget {
+  const KinvoiceApp({
+    super.key,
+    this.showOnboardingIfFirstLaunch = false,
+    this.preferencesService,
+  });
+
+  final bool showOnboardingIfFirstLaunch;
+  final AppPreferencesService? preferencesService;
+
+  @override
+  State<KinvoiceApp> createState() => _KinvoiceAppState();
+}
+
+class _KinvoiceAppState extends State<KinvoiceApp> {
+  late final AppPreferencesService _prefs;
+
+  @override
+  void initState() {
+    super.initState();
+    _prefs = widget.preferencesService ?? AppPreferencesService.instance;
+  }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Kinvoice',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.lightTheme,
-      darkTheme: AppTheme.darkTheme,
-      themeMode: ThemeMode.system,
-      home: const RootNavigationShell(),
+    return ListenableBuilder(
+      listenable: _prefs,
+      builder: (context, _) {
+        final shouldShowOnboarding =
+            widget.showOnboardingIfFirstLaunch && !_prefs.hasCompletedOnboarding;
+
+        return MaterialApp(
+          title: 'Kinvoice',
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.lightTheme,
+          darkTheme: AppTheme.darkTheme,
+          themeMode: _prefs.themeMode,
+          home: shouldShowOnboarding
+              ? OnboardingScreen(
+                  preferencesService: _prefs,
+                  onCompleted: () {
+                    if (mounted) {
+                      setState(() {});
+                    }
+                  },
+                )
+              : const RootNavigationShell(),
+        );
+      },
     );
   }
 }

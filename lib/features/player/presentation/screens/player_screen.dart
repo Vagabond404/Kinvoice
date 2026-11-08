@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../../../core/audio/audio_player_service.dart';
 import '../../../../core/audio/srt_export_helper.dart';
 import '../../../../core/database/recording_repository.dart';
@@ -12,7 +13,8 @@ import '../widgets/speaker_rename_dialog.dart';
 import '../widgets/transcript_segment_tile.dart';
 
 /// Screen displaying recording details, scrubbable waveform, playback controls,
-/// interactive transcripts, and export options (.SRT, .TXT, .WAV).
+/// interactive transcripts, 1-tap copy to clipboard, native share (text, audio,
+/// or both together), and Export Formats Hub (.SRT, .TXT, .WAV / .M4A).
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({
     super.key,
@@ -20,12 +22,14 @@ class PlayerScreen extends StatefulWidget {
     this.initialSegments,
     this.playerService,
     this.repository,
+    this.storageService,
   });
 
   final RecordingSummary recording;
   final List<TranscriptSegment>? initialSegments;
   final AudioPlayerService? playerService;
   final RecordingRepository? repository;
+  final RecordingStorageService? storageService;
 
   @override
   State<PlayerScreen> createState() => PlayerScreenState();
@@ -34,6 +38,7 @@ class PlayerScreen extends StatefulWidget {
 class PlayerScreenState extends State<PlayerScreen> {
   late final AudioPlayerService _playerService;
   late final RecordingRepository _repository;
+  late final RecordingStorageService _storageService;
   late final TextEditingController _titleController;
 
   Future<void>? pendingAsyncOperation;
@@ -62,6 +67,7 @@ class PlayerScreenState extends State<PlayerScreen> {
     _titleController = TextEditingController(text: _recording.title);
     _playerService = widget.playerService ?? AudioPlayerService();
     _repository = widget.repository ?? RecordingRepository();
+    _storageService = widget.storageService ?? RecordingStorageService.instance;
 
     _initPlayerListeners();
     _loadSegments();
@@ -230,7 +236,57 @@ class PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
-  void _exportFormat(String format) {
+  /// Copies the entire formatted transcript (with speaker tags and timestamps)
+  /// to the device clipboard (`Clipboard.setData`) with an animated confirmation toast.
+  Future<void> copyTranscriptToClipboard() async {
+    final formattedText = SrtExportHelper.generatePlainText(_segments);
+    await Clipboard.setData(ClipboardData(text: formattedText));
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Transcript copied to clipboard (${_segments.length} segments)',
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: AppColors.success,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _exportFormat(String format) async {
+    if (format == 'COPY') {
+      await copyTranscriptToClipboard();
+      return;
+    }
+    if (format == 'SHARE_TEXT') {
+      final text = SrtExportHelper.generatePlainText(_segments);
+      await _storageService.shareTextContent(
+        text: '${_titleController.text.trim()}\n\n$text',
+        subject: _titleController.text.trim(),
+      );
+      return;
+    }
+    if (format == 'SHARE_BOTH') {
+      final text = SrtExportHelper.generatePlainText(_segments);
+      await _storageService.shareAudioAndTranscript(
+        filePath: _recording.audioFilePath,
+        transcriptText: '${_titleController.text.trim()}\n\n$text',
+        title: _titleController.text.trim(),
+      );
+      return;
+    }
+
+    if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     String exportedContent = '';
 
@@ -262,12 +318,12 @@ class PlayerScreenState extends State<PlayerScreen> {
                     onPressed: () {
                       Navigator.pop(ctx);
                       if (format == 'WAV') {
-                        RecordingStorageService.instance.shareAudioFile(
+                        _storageService.shareAudioFile(
                           filePath: _recording.audioFilePath,
                           title: _recording.title,
                         );
                       } else {
-                        RecordingStorageService.instance.shareTextContent(
+                        _storageService.shareTextContent(
                           text: exportedContent,
                           subject: '${_recording.title} (.$format)',
                         );
@@ -298,12 +354,49 @@ class PlayerScreenState extends State<PlayerScreen> {
       appBar: AppBar(
         title: const Text('Recording Detail'),
         actions: [
-          // Export Actions Menu (.SRT, .TXT, .WAV)
+          // 1-Tap Copy Transcript Button
+          IconButton(
+            onPressed: copyTranscriptToClipboard,
+            icon: const Icon(Icons.copy_all_rounded),
+            tooltip: 'Copy Transcript',
+          ),
+          // Export & Native Share Hub Menu (.SRT, .TXT, .WAV, Text, Audio + Transcript)
           PopupMenuButton<String>(
             icon: const Icon(Icons.ios_share_rounded),
             tooltip: 'Export',
             onSelected: _exportFormat,
             itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'COPY',
+                child: Row(
+                  children: [
+                    Icon(Icons.copy_all_rounded, color: AppColors.accent, size: 20),
+                    SizedBox(width: 10),
+                    Expanded(child: Text('Copy Formatted Transcript')),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'SHARE_TEXT',
+                child: Row(
+                  children: [
+                    Icon(Icons.notes_rounded, color: AppColors.accent, size: 20),
+                    SizedBox(width: 10),
+                    Expanded(child: Text('Share Formatted Text Note')),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'SHARE_BOTH',
+                child: Row(
+                  children: [
+                    Icon(Icons.share_rounded, color: AppColors.accent, size: 20),
+                    SizedBox(width: 10),
+                    Expanded(child: Text('Share Audio + Transcript Together')),
+                  ],
+                ),
+              ),
+              PopupMenuDivider(),
               PopupMenuItem(
                 value: 'SRT',
                 child: Row(
@@ -379,7 +472,10 @@ class PlayerScreenState extends State<PlayerScreen> {
                         ),
                       ),
                       const SizedBox(width: 10),
-                      Text('•', style: TextStyle(color: AppColors.textSecondaryLight)),
+                      const Text(
+                        '•',
+                        style: TextStyle(color: AppColors.textSecondaryLight),
+                      ),
                       const SizedBox(width: 10),
                       Text(
                         _recording.formattedDuration,
@@ -464,7 +560,7 @@ class PlayerScreenState extends State<PlayerScreen> {
             ),
             const Divider(height: 16),
 
-            // Segmented Transcript Header
+            // Segmented Transcript Header with Quick Copy Pill
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
               child: Row(
@@ -476,13 +572,51 @@ class PlayerScreenState extends State<PlayerScreen> {
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  Text(
-                    '${_segments.length} segments',
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: isDark
-                          ? AppColors.textSecondaryDark
-                          : AppColors.textSecondaryLight,
-                    ),
+                  Row(
+                    children: [
+                      Text(
+                        '${_segments.length} segments',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: isDark
+                              ? AppColors.textSecondaryDark
+                              : AppColors.textSecondaryLight,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      InkWell(
+                        onTap: copyTranscriptToClipboard,
+                        borderRadius: BorderRadius.circular(12),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppColors.accent.withValues(alpha: 0.14),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.copy_rounded,
+                                size: 13,
+                                color: AppColors.accent,
+                              ),
+                              SizedBox(width: 4),
+                              Text(
+                                'Copy',
+                                style: TextStyle(
+                                  color: AppColors.accent,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),

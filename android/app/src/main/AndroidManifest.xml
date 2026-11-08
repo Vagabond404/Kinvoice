@@ -1,4 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -6,7 +7,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
-        android:label="kinvoice"
+        android:label="Kinvoice"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -28,11 +29,24 @@
             </intent-filter>
         </activity>
 
-        <!-- Ambient Voice Ear Foreground Service -->
+        <!-- Ongoing Interactive Recording & Ambient Voice Ear Foreground Service -->
         <service
             android:name=".AmbientAudioService"
             android:foregroundServiceType="microphone"
             android:exported="false" />
+
+        <!-- Home Screen 1-Tap Quick Capture AppWidget -->
+        <receiver
+            android:name=".KinvoiceQuickRecordWidgetProvider"
+            android:exported="true"
+            android:label="Kinvoice Quick Capture">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/kinvoice_quick_record_widget_info" />
+        </receiver>
 
         <meta-data
             android:name="flutterEmbedding"

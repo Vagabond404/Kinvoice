@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../../../core/ai/model_manager/model_download_service.dart';
+import '../../../../core/database/recording_repository.dart';
+import '../../../../core/services/recording_notification_service.dart';
 import '../../../../core/services/recording_storage_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../player/presentation/screens/player_screen.dart';
@@ -15,7 +18,8 @@ import '../widgets/time_filter_selector.dart';
 
 /// The Timeline / Home Screen for Kinvoice.
 /// Features a CustomScrollView with slivers, Hero Record Card, Time Filters,
-/// real SQLite recordings feed, and interactive playback/management.
+/// real SQLite recordings feed, Quick Record widget launch handling, crash
+/// recovery, and interactive playback/management.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
@@ -30,12 +34,78 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   late final HomeViewModel _viewModel;
+  StreamSubscription<void>? _quickRecordSub;
 
   @override
   void initState() {
     super.initState();
     _viewModel = widget.viewModel ?? HomeViewModel();
     _checkAndAutoDownloadInitialModels();
+    _initWidgetQuickRecordAndCrashRecovery();
+  }
+
+  Future<void> _initWidgetQuickRecordAndCrashRecovery() async {
+    _quickRecordSub =
+        RecordingNotificationService.instance.quickRecordStream.listen((_) {
+      if (mounted) {
+        _openRecordingModal(context);
+      }
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      final launchedFromWidget = await RecordingNotificationService.instance
+          .consumeQuickRecordLaunchIntent();
+      if (launchedFromWidget && mounted) {
+        await _openRecordingModal(context);
+        return;
+      }
+
+      // Check if an unfinalized recording needs crash recovery
+      final unfinalized = await RecordingNotificationService.instance
+          .checkUnfinalizedRecording();
+      if (unfinalized != null && mounted) {
+        await _recoverUnfinalizedRecording(unfinalized);
+      }
+    });
+  }
+
+  Future<void> _recoverUnfinalizedRecording(
+    CrashRecoveryJournalEntry entry,
+  ) async {
+    try {
+      final persistedPath =
+          await RecordingStorageService.instance.persistRecordingFile(
+        tempFilePath: entry.tempFilePath,
+        category: entry.category,
+        timestamp: entry.startedAt,
+      );
+      final recId = 'rec_recovered_${entry.startedAt.millisecondsSinceEpoch}';
+      final repo = RecordingRepository();
+      await repo.saveRecordingWithSegments(
+        recording: RecordingSummary(
+          id: recId,
+          title: '${entry.title} (Recovered)',
+          createdAt: entry.startedAt,
+          durationSeconds: entry.elapsedSeconds > 0 ? entry.elapsedSeconds : 1,
+          transcriptSnippet: 'Recovered from interrupted session.',
+          speakers: const ['Speaker 1'],
+          tags: ['#${entry.category}', '#Recovered'],
+          isFavorite: false,
+          audioFilePath: persistedPath,
+        ),
+        segments: const [],
+      );
+      await RecordingNotificationService.instance.clearRecoveryJournal();
+      await _viewModel.loadRecordings();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Recovered interrupted recording: "${entry.title}"'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+    } catch (_) {}
   }
 
   Future<void> _checkAndAutoDownloadInitialModels() async {
@@ -49,6 +119,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _quickRecordSub?.cancel();
     if (widget.viewModel == null) {
       _viewModel.dispose();
     }
@@ -141,9 +212,20 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               ListTile(
                 leading:
+                    const Icon(Icons.copy_all_rounded, color: AppColors.accent),
+                title: const Text('Copy Transcript'),
+                onTap: () => Navigator.pop(ctx, 'copy_transcript'),
+              ),
+              ListTile(
+                leading:
                     const Icon(Icons.ios_share_rounded, color: AppColors.accent),
                 title: const Text('Share Audio File'),
                 onTap: () => Navigator.pop(ctx, 'share'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.share_rounded, color: AppColors.accent),
+                title: const Text('Share Audio + Transcript Together'),
+                onTap: () => Navigator.pop(ctx, 'share_both'),
               ),
               ListTile(
                 leading: const Icon(
@@ -166,9 +248,26 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (selectedAction == 'rename') {
       await _promptRenameDialog(recording);
+    } else if (selectedAction == 'copy_transcript') {
+      await Clipboard.setData(
+        ClipboardData(text: '${recording.title}\n\n${recording.transcriptSnippet}'),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Transcript copied to clipboard'),
+          backgroundColor: AppColors.success,
+        ),
+      );
     } else if (selectedAction == 'share') {
       await RecordingStorageService.instance.shareAudioFile(
         filePath: recording.audioFilePath,
+        title: recording.title,
+      );
+    } else if (selectedAction == 'share_both') {
+      await RecordingStorageService.instance.shareAudioAndTranscript(
+        filePath: recording.audioFilePath,
+        transcriptText: '${recording.title}\n\n${recording.transcriptSnippet}',
         title: recording.title,
       );
     } else if (selectedAction == 'delete') {

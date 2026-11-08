@@ -189,6 +189,53 @@ class RecordingStorageService {
     );
   }
 
+  /// Shares both the audio file (.wav / .m4a) AND the formatted transcript text together
+  /// via the native share sheet (WhatsApp, Telegram, Gmail, etc.).
+  Future<void> shareAudioAndTranscript({
+    required String filePath,
+    required String transcriptText,
+    String? title,
+  }) async {
+    final file = File(filePath);
+    final subject = title ?? 'Kinvoice Voice Note & Transcript';
+    if (await file.exists()) {
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(filePath)],
+          text: transcriptText.trim().isEmpty ? subject : transcriptText,
+          subject: subject,
+        ),
+      );
+    } else {
+      await shareTextContent(
+        text: transcriptText.trim().isEmpty
+            ? '$subject ($filePath)'
+            : transcriptText,
+        subject: subject,
+      );
+    }
+  }
+
+  /// Writes an exported subtitle (.srt) or transcript (.txt) file into the Kinvoice
+  /// recordings directory and returns the saved file path.
+  Future<String> saveExportedTranscriptFile({
+    required String title,
+    required String extension,
+    required String content,
+  }) async {
+    final dir = await getRecordingsDirectory();
+    final safeTitle = title
+        .trim()
+        .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_')
+        .replaceAll(RegExp(r'_+'), '_');
+    final cleanTitle = safeTitle.isEmpty ? 'Transcript' : safeTitle;
+    final cleanExt = extension.replaceAll('.', '').toLowerCase();
+    final filePath = p.join(dir.path, '${cleanTitle}_export.$cleanExt');
+    final file = File(filePath);
+    await file.writeAsString(content);
+    return filePath;
+  }
+
   /// Deletes all saved audio files and temporary recordings inside `Kinvoice/`.
   Future<void> clearAllRecordingsAndCache() async {
     try {
