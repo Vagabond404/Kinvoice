@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../../../core/audio/audio_player_service.dart';
 import '../../../../core/audio/srt_export_helper.dart';
 import '../../../../core/database/recording_repository.dart';
+import '../../../../core/services/recording_storage_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../home/domain/models/recording_summary.dart';
 import '../../domain/models/transcript_segment.dart';
@@ -49,6 +50,7 @@ class PlayerScreenState extends State<PlayerScreen> {
   StreamSubscription<Duration>? _posSub;
   StreamSubscription<Duration>? _durSub;
   StreamSubscription<dynamic>? _stateSub;
+  StreamSubscription<void>? _dbChangesSub;
 
   final List<double> _speedOptions = const [1.0, 1.25, 1.5, 2.0];
 
@@ -63,6 +65,11 @@ class PlayerScreenState extends State<PlayerScreen> {
 
     _initPlayerListeners();
     _loadSegments();
+    _dbChangesSub = RecordingRepository.changes.listen((_) {
+      if (mounted && widget.initialSegments == null) {
+        _loadSegments();
+      }
+    });
   }
 
   void _initPlayerListeners() {
@@ -147,6 +154,7 @@ class PlayerScreenState extends State<PlayerScreen> {
     _posSub?.cancel();
     _durSub?.cancel();
     _stateSub?.cancel();
+    _dbChangesSub?.cancel();
     _titleController.dispose();
     if (widget.playerService == null) {
       _playerService.dispose();
@@ -250,6 +258,23 @@ class PlayerScreenState extends State<PlayerScreen> {
                   child: SelectableText(exportedContent),
                 ),
                 actions: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      if (format == 'WAV') {
+                        RecordingStorageService.instance.shareAudioFile(
+                          filePath: _recording.audioFilePath,
+                          title: _recording.title,
+                        );
+                      } else {
+                        RecordingStorageService.instance.shareTextContent(
+                          text: exportedContent,
+                          subject: '${_recording.title} (.$format)',
+                        );
+                      }
+                    },
+                    child: const Text('Share'),
+                  ),
                   TextButton(
                     onPressed: () => Navigator.pop(ctx),
                     child: const Text('Close'),

@@ -2,8 +2,12 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../../../core/audio/audio_recorder_service.dart';
+import '../../../../core/database/recording_repository.dart';
+import '../../../../core/services/app_preferences_service.dart';
+import '../../../../core/services/recording_storage_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../widgets/live_waveform_painter.dart';
+import '../widgets/save_recording_dialog.dart';
 
 /// Full-screen dark mode studio recording modal with live waveform visualizer,
 /// digital timer, active speaker/VAD indicator, and recording controls.
@@ -11,10 +15,16 @@ class RecordingScreen extends StatefulWidget {
   const RecordingScreen({
     super.key,
     this.recorderService,
+    this.storageService,
+    this.repository,
+    this.preferencesService,
     this.initialTitle = 'New Recording',
   });
 
   final AudioRecorderService? recorderService;
+  final RecordingStorageService? storageService;
+  final RecordingRepository? repository;
+  final AppPreferencesService? preferencesService;
   final String initialTitle;
 
   @override
@@ -164,27 +174,46 @@ class _RecordingScreenState extends State<RecordingScreen>
       _isSaving = true;
     });
 
+    final capturedDuration = _elapsed > Duration.zero
+        ? _elapsed
+        : _recorderService.currentDuration;
     final result = await _recorderService.stopRecording();
 
-    if (mounted) {
-      setState(() {
-        _isSaving = false;
-      });
+    if (!mounted) return;
 
-      result.fold(
-        onSuccess: (filePath) {
-          Navigator.pop(context, filePath);
-        },
-        onError: (failure) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(failure.message),
-              backgroundColor: AppColors.recording,
-            ),
-          );
-        },
-      );
-    }
+    setState(() {
+      _isSaving = false;
+    });
+
+    await result.fold(
+      onSuccess: (tempFilePath) async {
+        final dialogResult = await SaveRecordingDialog.show(
+          context,
+          tempFilePath: tempFilePath,
+          duration: capturedDuration,
+          initialTitle: _titleController.text.trim(),
+          storageService: widget.storageService,
+          repository: widget.repository,
+          preferencesService: widget.preferencesService,
+        );
+
+        if (!mounted) return;
+        if (dialogResult != null && dialogResult.isSaved) {
+          Navigator.pop(context, dialogResult.savedFilePath);
+        } else {
+          Navigator.pop(context, null);
+        }
+      },
+      onError: (failure) async {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(failure.message),
+            backgroundColor: AppColors.recording,
+          ),
+        );
+      },
+    );
   }
 
   @override

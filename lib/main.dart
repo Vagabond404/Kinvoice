@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
+import 'core/services/app_preferences_service.dart';
 import 'core/theme/app_theme.dart';
 import 'features/home/presentation/screens/home_screen.dart';
 import 'features/search/presentation/screens/search_screen.dart';
 import 'features/settings/presentation/screens/settings_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await AppPreferencesService.instance.init();
   runApp(const KinvoiceApp());
 }
 

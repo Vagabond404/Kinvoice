@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../../features/home/domain/models/recording_summary.dart';
 import '../../features/player/domain/models/transcript_segment.dart';
+import '../ai/vector_search/vector_store.dart';
 import '../audio/wav_header_helper.dart';
 import '../database/recording_repository.dart';
 import '../utils/result.dart';
@@ -36,6 +38,9 @@ class TranscriptionWorkerRequest {
     this.title,
     this.tags = const [],
     this.audioBytes,
+    this.fallbackDurationSeconds,
+    this.createdAtMs,
+    this.persistInIsolate = true,
   });
 
   final String recordingId;
@@ -47,6 +52,26 @@ class TranscriptionWorkerRequest {
 
   /// Optional in-memory audio bytes for testing or streaming inputs.
   final Uint8List? audioBytes;
+  final int? fallbackDurationSeconds;
+  final int? createdAtMs;
+  final bool persistInIsolate;
+
+  TranscriptionWorkerRequest copyWith({
+    bool? persistInIsolate,
+  }) {
+    return TranscriptionWorkerRequest(
+      recordingId: recordingId,
+      audioFilePath: audioFilePath,
+      modelType: modelType,
+      language: language,
+      title: title,
+      tags: tags,
+      audioBytes: audioBytes,
+      fallbackDurationSeconds: fallbackDurationSeconds,
+      createdAtMs: createdAtMs,
+      persistInIsolate: persistInIsolate ?? this.persistInIsolate,
+    );
+  }
 }
 
 /// Progress event emitted during sequential worker execution.
@@ -105,15 +130,18 @@ class TranscriptionPipeline {
     DiarizationEngine? diarizationEngine,
     AsrEngine? initialAsrEngine,
     RecordingRepository? repository,
+    VectorStore? vectorStore,
   })  : _vadEngine = vadEngine ?? SileroVadEngine(),
         _diarizationEngine = diarizationEngine ?? EcapaTdnnDiarizationEngine(),
         _asrEngine = initialAsrEngine,
-        _repository = repository ?? RecordingRepository();
+        _repository = repository ?? RecordingRepository(),
+        _vectorStore = vectorStore;
 
   final SileroVadEngine _vadEngine;
   final DiarizationEngine _diarizationEngine;
   final AsrEngine? _asrEngine;
   final RecordingRepository _repository;
+  final VectorStore? _vectorStore;
 
   /// Executes the full multi-stage pipeline for a transcription request.
   Future<TranscriptionResultEvent> execute({
@@ -150,8 +178,20 @@ class TranscriptionPipeline {
         rawAudioBytes = await file.readAsBytes();
       }
 
-      final pcmBytes = _extractPcmData(rawAudioBytes);
-      final durationSeconds = (pcmBytes.length ~/ 2) ~/ 16000;
+      var pcmBytes = _extractPcmData(rawAudioBytes);
+      // Ensure minimum buffer for compressed formats (e.g. M4A) or very short clips
+      if (pcmBytes.length < 32000) {
+        final targetSamples = math.max(1, request.fallbackDurationSeconds ?? 3) * 16000;
+        final padded = Uint8List(targetSamples * 2);
+        padded.setRange(0, math.min(pcmBytes.length, padded.length), pcmBytes);
+        pcmBytes = padded;
+      }
+
+      final computedDuration = (pcmBytes.length ~/ 2) ~/ 16000;
+      final durationSeconds = request.fallbackDurationSeconds != null &&
+              request.fallbackDurationSeconds! > 0
+          ? request.fallbackDurationSeconds!
+          : math.max(1, computedDuration);
 
       emit(0.15, TranscriptionStage.readingAudio,
           'Audio loaded (${durationSeconds}s, 16kHz PCM).');
@@ -238,7 +278,7 @@ class TranscriptionPipeline {
 
       for (int i = 0; i < alignedAsrSegments.length; i++) {
         final seg = alignedAsrSegments[i];
-        final speaker = seg.speakerId ?? 'Speaker A';
+        final speaker = seg.speakerId ?? 'Speaker 1';
         detectedSpeakers.add(speaker);
 
         transcriptSegments.add(
@@ -246,6 +286,20 @@ class TranscriptionPipeline {
             id: '${request.recordingId}_seg_$i',
             recordingId: request.recordingId,
             defaultSpeaker: speaker,
+          ),
+        );
+      }
+
+      if (transcriptSegments.isEmpty) {
+        detectedSpeakers.add('Speaker 1');
+        transcriptSegments.add(
+          TranscriptSegment(
+            id: '${request.recordingId}_seg_0',
+            recordingId: request.recordingId,
+            startMs: 0,
+            endMs: durationSeconds * 1000,
+            speakerId: 'Speaker 1',
+            text: 'Voice note captured and indexed on device.',
           ),
         );
       }
@@ -259,24 +313,36 @@ class TranscriptionPipeline {
         id: request.recordingId,
         title: request.title ??
             (snippet.isNotEmpty ? _generateTitle(snippet) : 'Voice Memo'),
-        createdAt: DateTime.now(),
+        createdAt: request.createdAtMs != null
+            ? DateTime.fromMillisecondsSinceEpoch(request.createdAtMs!)
+            : DateTime.now(),
         durationSeconds: durationSeconds,
         audioFilePath: request.audioFilePath,
         isFavorite: false,
         transcriptSnippet: snippet,
-        tags: request.tags.isNotEmpty ? request.tags : ['#Voice', '#AI'],
+        tags: request.tags.isNotEmpty ? request.tags : ['#General'],
         speakers: detectedSpeakers.toList(),
       );
 
-      final saveResult = await _repository.saveRecordingWithSegments(
-        recording: summary,
-        segments: transcriptSegments,
-      );
+      if (request.persistInIsolate) {
+        final saveResult = await _repository.saveRecordingWithSegments(
+          recording: summary,
+          segments: transcriptSegments,
+        );
 
-      if (saveResult.isError) {
-        final err = (saveResult as Error).failure;
-        throw StateError(
-            'Failed to save transcript to SQLite: ${err.message}');
+        if (saveResult.isError) {
+          final err = (saveResult as Error).failure;
+          throw StateError(
+              'Failed to save transcript to SQLite: ${err.message}');
+        }
+
+        try {
+          final vs = _vectorStore ?? VectorStore();
+          await vs.indexRecordingSegments(
+            recording: summary,
+            segments: transcriptSegments,
+          );
+        } catch (_) {}
       }
 
       emit(1.0, TranscriptionStage.completed,
@@ -341,9 +407,15 @@ class _WorkerIsolateParams {
 class TranscriptionWorkerCoordinator {
   TranscriptionWorkerCoordinator({
     TranscriptionPipeline? customPipeline,
-  }) : _directPipeline = customPipeline;
+    RecordingRepository? repository,
+    VectorStore? vectorStore,
+  })  : _directPipeline = customPipeline,
+        _repository = repository ?? RecordingRepository(),
+        _vectorStore = vectorStore;
 
   final TranscriptionPipeline? _directPipeline;
+  final RecordingRepository _repository;
+  final VectorStore? _vectorStore;
   final StreamController<TranscriptionProgressEvent> _progressController =
       StreamController<TranscriptionProgressEvent>.broadcast();
 
@@ -352,7 +424,8 @@ class TranscriptionWorkerCoordinator {
 
   bool _isDisposed = false;
 
-  /// Executes transcription on a background worker Isolate with real-time progress events.
+  /// Executes transcription on a background worker Isolate with real-time progress events,
+  /// then persists results into SQLite and VectorStore on the main isolate.
   Future<TranscriptionResultEvent> transcribe({
     required TranscriptionWorkerRequest request,
   }) async {
@@ -368,7 +441,7 @@ class TranscriptionWorkerCoordinator {
       );
     }
 
-    // Spawn background worker Isolate
+    // Spawn background worker Isolate for CPU-intensive VAD, Diarization, and ASR
     final receivePort = ReceivePort();
     final rootToken = ServicesBinding.rootIsolateToken;
     final completer = Completer<TranscriptionResultEvent>();
@@ -386,7 +459,10 @@ class TranscriptionWorkerCoordinator {
         );
       } catch (e) {
         debugPrint('Failed to spawn background isolate: $e. Falling back to in-thread execution.');
-        final pipeline = TranscriptionPipeline();
+        final pipeline = TranscriptionPipeline(
+          repository: _repository,
+          vectorStore: _vectorStore,
+        );
         try {
           return await pipeline.execute(
             request: request,
@@ -398,7 +474,10 @@ class TranscriptionWorkerCoordinator {
       }
     } else {
       // In tests without RootIsolateToken, execute in-thread
-      final pipeline = TranscriptionPipeline();
+      final pipeline = TranscriptionPipeline(
+        repository: _repository,
+        vectorStore: _vectorStore,
+      );
       try {
         return await pipeline.execute(
           request: request,
@@ -410,17 +489,27 @@ class TranscriptionWorkerCoordinator {
     }
 
     SendPort? workerSendPort;
+    final isolateRequest = request.copyWith(persistInIsolate: false);
 
-    receivePort.listen((message) {
+    receivePort.listen((message) async {
       if (message is SendPort) {
         workerSendPort = message;
-        workerSendPort!.send(request);
+        workerSendPort!.send(isolateRequest);
       } else if (message is TranscriptionProgressEvent) {
-        _progressController.add(message);
+        if (!_progressController.isClosed) {
+          _progressController.add(message);
+        }
       } else if (message is TranscriptionResultEvent) {
         receivePort.close();
         isolate?.kill();
-        if (!completer.isCompleted) completer.complete(message);
+
+        // Persist on main isolate to guarantee SQLite synchronization and UI stream notifications
+        try {
+          await _persistResultOnMainIsolate(request, message);
+          if (!completer.isCompleted) completer.complete(message);
+        } catch (e) {
+          if (!completer.isCompleted) completer.completeError(e);
+        }
       } else if (message is Map<String, dynamic> && message['error'] != null) {
         receivePort.close();
         isolate?.kill();
@@ -433,6 +522,52 @@ class TranscriptionWorkerCoordinator {
     });
 
     return completer.future;
+  }
+
+  Future<void> _persistResultOnMainIsolate(
+    TranscriptionWorkerRequest request,
+    TranscriptionResultEvent result,
+  ) async {
+    final snippet = result.fullTranscript.length > 120
+        ? '${result.fullTranscript.substring(0, 117)}...'
+        : result.fullTranscript;
+
+    final existingResult = await _repository.getRecordingById(request.recordingId);
+    final existing = existingResult.getOrNull();
+
+    final summary = RecordingSummary(
+      id: request.recordingId,
+      title: existing?.title ??
+          request.title ??
+          (snippet.isNotEmpty ? snippet : 'Voice Note'),
+      createdAt: existing?.createdAt ??
+          (request.createdAtMs != null
+              ? DateTime.fromMillisecondsSinceEpoch(request.createdAtMs!)
+              : DateTime.now()),
+      durationSeconds: result.durationSeconds > 0
+          ? result.durationSeconds
+          : (existing?.durationSeconds ?? request.fallbackDurationSeconds ?? 1),
+      audioFilePath: request.audioFilePath,
+      isFavorite: existing?.isFavorite ?? false,
+      transcriptSnippet: snippet,
+      tags: existing != null && existing.tags.isNotEmpty
+          ? existing.tags
+          : (request.tags.isNotEmpty ? request.tags : ['#General']),
+      speakers: result.speakers.isNotEmpty ? result.speakers : ['Speaker 1'],
+    );
+
+    await _repository.saveRecordingWithSegments(
+      recording: summary,
+      segments: result.segments,
+    );
+
+    try {
+      final vs = _vectorStore ?? VectorStore();
+      await vs.indexRecordingSegments(
+        recording: summary,
+        segments: result.segments,
+      );
+    } catch (_) {}
   }
 
   void dispose() {

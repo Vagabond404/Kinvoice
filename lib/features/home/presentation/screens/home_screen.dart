@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
+import '../../../../core/services/recording_storage_service.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../player/presentation/screens/player_screen.dart';
 import '../../../recording/presentation/screens/recording_screen.dart';
+import '../../domain/models/recording_summary.dart';
 import '../view_models/home_view_model.dart';
 import '../widgets/hero_quick_record_card.dart';
 import '../widgets/recording_feed_item.dart';
 import '../widgets/time_filter_selector.dart';
 
 /// The Timeline / Home Screen for Kinvoice.
-/// Features a CustomScrollView with slivers, Hero Record Card, Time Filters, and chronologically grouped recordings.
+/// Features a CustomScrollView with slivers, Hero Record Card, Time Filters,
+/// real SQLite recordings feed, and interactive playback/management.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
@@ -38,6 +42,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openRecordingModal(BuildContext context) async {
+    await _viewModel.stopPlayback();
+    if (!context.mounted) return;
+
     final messenger = ScaffoldMessenger.of(context);
     final savedPath = await Navigator.push<String?>(
       context,
@@ -50,10 +57,183 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
 
     if (savedPath != null) {
+      await _viewModel.loadRecordings();
+      if (!mounted) return;
       messenger.showSnackBar(
         SnackBar(
-          content: Text('Recording saved: $savedPath'),
+          content: Text('Recording saved & transcribing: $savedPath'),
           backgroundColor: AppColors.success,
+        ),
+      );
+    }
+  }
+
+  Future<void> _openPlayerScreen(RecordingSummary recording) async {
+    await _viewModel.stopPlayback();
+    if (!mounted) return;
+
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PlayerScreen(recording: recording),
+      ),
+    );
+
+    if (!mounted) return;
+    await _viewModel.loadRecordings();
+  }
+
+  Future<void> _showRecordingActionsSheet(RecordingSummary recording) async {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    final selectedAction = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: isDark ? AppColors.surfaceDark : AppColors.surfaceLight,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+                child: Text(
+                  recording.title,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.edit_rounded, color: AppColors.accent),
+                title: const Text('Rename Recording'),
+                onTap: () => Navigator.pop(ctx, 'rename'),
+              ),
+              ListTile(
+                leading:
+                    const Icon(Icons.ios_share_rounded, color: AppColors.accent),
+                title: const Text('Share Audio File'),
+                onTap: () => Navigator.pop(ctx, 'share'),
+              ),
+              ListTile(
+                leading: const Icon(
+                  Icons.delete_outline_rounded,
+                  color: AppColors.recording,
+                ),
+                title: const Text(
+                  'Delete Recording',
+                  style: TextStyle(color: AppColors.recording),
+                ),
+                onTap: () => Navigator.pop(ctx, 'delete'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (!mounted || selectedAction == null) return;
+
+    if (selectedAction == 'rename') {
+      await _promptRenameDialog(recording);
+    } else if (selectedAction == 'share') {
+      await RecordingStorageService.instance.shareAudioFile(
+        filePath: recording.audioFilePath,
+        title: recording.title,
+      );
+    } else if (selectedAction == 'delete') {
+      await _confirmDeleteDialog(recording);
+    }
+  }
+
+  Future<void> _promptRenameDialog(RecordingSummary recording) async {
+    final controller = TextEditingController(text: recording.title);
+    final newTitle = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename Recording'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Recording Title',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+
+    if (newTitle != null && newTitle.isNotEmpty && mounted) {
+      await _viewModel.renameRecording(recording.id, newTitle);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Renamed to "$newTitle"'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+    }
+  }
+
+  Future<void> _confirmDeleteDialog(RecordingSummary recording) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Recording?'),
+        content: Text(
+          'Are you sure you want to permanently delete "${recording.title}" and its local audio file?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.recording,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      await _viewModel.deleteRecording(recording.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Recording and local audio file deleted.'),
+          backgroundColor: AppColors.recording,
         ),
       );
     }
@@ -69,6 +249,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: ListenableBuilder(
           listenable: _viewModel,
           builder: (context, _) {
+            final allRecordings = _viewModel.allRecordings;
             final recordings = _viewModel.filteredRecordings;
 
             return CustomScrollView(
@@ -115,8 +296,9 @@ class _HomeScreenState extends State<HomeScreen> {
                           ],
                         ),
                         IconButton.filledTonal(
-                          onPressed: () {},
-                          icon: const Icon(Icons.notifications_none_rounded),
+                          onPressed: _viewModel.loadRecordings,
+                          tooltip: 'Refresh Recordings',
+                          icon: const Icon(Icons.refresh_rounded),
                           style: IconButton.styleFrom(
                             backgroundColor: isDark
                                 ? AppColors.surfaceContainerDark
@@ -134,7 +316,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 // Hero Quick Record Card
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 8,
+                    ),
                     child: HeroQuickRecordCard(
                       isRecording: _viewModel.isRecording,
                       onRecordTap: () => _openRecordingModal(context),
@@ -194,8 +379,67 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
 
-                // Recording Feed Items or Empty State
-                if (recordings.isEmpty)
+                // Recording Feed Items or Stitch-Style Empty State
+                if (allRecordings.isEmpty)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 32,
+                        vertical: 48,
+                      ),
+                      child: Container(
+                        padding: const EdgeInsets.all(28),
+                        decoration: BoxDecoration(
+                          color: isDark
+                              ? AppColors.surfaceContainerDark
+                              : AppColors.surfaceContainerLight,
+                          borderRadius: BorderRadius.circular(24),
+                          border: Border.all(
+                            color: isDark
+                                ? AppColors.borderDark
+                                : AppColors.borderLight,
+                          ),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 68,
+                              height: 68,
+                              decoration: BoxDecoration(
+                                color: AppColors.accent.withValues(alpha: 0.14),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.graphic_eq_rounded,
+                                size: 36,
+                                color: AppColors.accent,
+                              ),
+                            ),
+                            const SizedBox(height: 18),
+                            Text(
+                              'No voice notes yet',
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Tap the record button above to capture your first thought.',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: isDark
+                                    ? AppColors.textSecondaryDark
+                                    : AppColors.textSecondaryLight,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                else if (recordings.isEmpty)
                   SliverToBoxAdapter(
                     child: Padding(
                       padding: const EdgeInsets.all(40),
@@ -225,21 +469,29 @@ class _HomeScreenState extends State<HomeScreen> {
                   )
                 else
                   SliverPadding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 4,
+                    ),
                     sliver: SliverList.separated(
                       itemCount: recordings.length,
-                      separatorBuilder: (context, index) => const SizedBox(height: 12),
+                      separatorBuilder: (context, index) =>
+                          const SizedBox(height: 12),
                       itemBuilder: (context, index) {
                         final recording = recordings[index];
-                        final isPlaying =
-                            _viewModel.isPlaying &&
+                        final isPlaying = _viewModel.isPlaying &&
                             _viewModel.activePlayingId == recording.id;
 
                         return RecordingFeedItem(
                           recording: recording,
                           isPlaying: isPlaying,
-                          onFavoriteToggle: () => _viewModel.toggleFavorite(recording.id),
-                          onPlayToggle: () => _viewModel.togglePlay(recording.id),
+                          onFavoriteToggle: () =>
+                              _viewModel.toggleFavorite(recording.id),
+                          onPlayToggle: () =>
+                              _viewModel.togglePlay(recording.id),
+                          onTap: () => _openPlayerScreen(recording),
+                          onLongPress: () =>
+                              _showRecordingActionsSheet(recording),
                         );
                       },
                     ),

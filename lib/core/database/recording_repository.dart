@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 import '../../features/home/domain/models/recording_summary.dart';
@@ -31,9 +32,22 @@ class FtsSearchResult {
 /// and FTS5 indexing.
 class RecordingRepository {
   RecordingRepository({AppDatabase? appDatabase})
-      : _appDatabase = appDatabase ?? AppDatabase();
+      : _appDatabase = appDatabase ?? AppDatabase.instance;
 
   final AppDatabase _appDatabase;
+
+  static final StreamController<void> _changeController =
+      StreamController<void>.broadcast();
+
+  /// Stream emitting an event whenever recordings or segments change in SQLite.
+  static Stream<void> get changes => _changeController.stream;
+
+  /// Notifies listeners that the recordings table has been updated.
+  static void notifyChanges() {
+    if (!_changeController.isClosed) {
+      _changeController.add(null);
+    }
+  }
 
   /// Transactionally inserts or updates a recording and its child audio segments,
   /// updating the FTS5 virtual table index in the same atomic block.
@@ -104,6 +118,7 @@ class RecordingRepository {
         );
       });
 
+      notifyChanges();
       return const Result.success(null);
     } catch (e, stack) {
       return Result.error(
@@ -339,10 +354,33 @@ class RecordingRepository {
         }
       });
 
+      notifyChanges();
       return const Result.success(null);
     } catch (e, stack) {
       return Result.error(
         DatabaseFailure('Failed to rename speaker: $e', e, stack),
+      );
+    }
+  }
+
+  /// Updates recording favorite status.
+  Future<Result<void, DatabaseFailure>> updateFavoriteStatus({
+    required String recordingId,
+    required bool isFavorite,
+  }) async {
+    try {
+      final db = await _appDatabase.database;
+      await db.update(
+        DatabaseTables.recordings,
+        {'is_favorite': isFavorite ? 1 : 0},
+        where: 'id = ?',
+        whereArgs: [recordingId],
+      );
+      notifyChanges();
+      return const Result.success(null);
+    } catch (e, stack) {
+      return Result.error(
+        DatabaseFailure('Failed to update favorite status: $e', e, stack),
       );
     }
   }
@@ -402,6 +440,7 @@ class RecordingRepository {
         }
       });
 
+      notifyChanges();
       return const Result.success(null);
     } catch (e, stack) {
       return Result.error(
@@ -410,7 +449,7 @@ class RecordingRepository {
     }
   }
 
-  /// Deletes a recording and its associated segments.
+  /// Deletes a recording and its associated segments and embeddings.
   Future<Result<void, DatabaseFailure>> deleteRecording(
     String recordingId,
   ) async {
@@ -432,12 +471,38 @@ class RecordingRepository {
           where: 'recording_id = ?',
           whereArgs: [recordingId],
         );
+        await txn.delete(
+          DatabaseTables.transcriptEmbeddings,
+          where: 'recording_id = ?',
+          whereArgs: [recordingId],
+        );
       });
 
+      notifyChanges();
       return const Result.success(null);
     } catch (e, stack) {
       return Result.error(
         DatabaseFailure('Failed to delete recording: $e', e, stack),
+      );
+    }
+  }
+
+  /// Clears all recordings, segments, FTS5 entries, and vector embeddings.
+  Future<Result<void, DatabaseFailure>> clearAllRecordings() async {
+    try {
+      final db = await _appDatabase.database;
+      await db.transaction((txn) async {
+        await txn.delete(DatabaseTables.recordings);
+        await txn.delete(DatabaseTables.segments);
+        await txn.delete(DatabaseTables.recordingsFts);
+        await txn.delete(DatabaseTables.transcriptEmbeddings);
+      });
+
+      notifyChanges();
+      return const Result.success(null);
+    } catch (e, stack) {
+      return Result.error(
+        DatabaseFailure('Failed to clear all recordings: $e', e, stack),
       );
     }
   }

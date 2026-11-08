@@ -11,6 +11,7 @@ class RecordingFeedItem extends StatelessWidget {
     required this.onFavoriteToggle,
     required this.onPlayToggle,
     this.onTap,
+    this.onLongPress,
   });
 
   final RecordingSummary recording;
@@ -18,6 +19,7 @@ class RecordingFeedItem extends StatelessWidget {
   final VoidCallback onFavoriteToggle;
   final VoidCallback onPlayToggle;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -27,6 +29,7 @@ class RecordingFeedItem extends StatelessWidget {
     return Card(
       child: InkWell(
         onTap: onTap,
+        onLongPress: onLongPress,
         borderRadius: BorderRadius.circular(24),
         child: Padding(
           padding: const EdgeInsets.all(18),

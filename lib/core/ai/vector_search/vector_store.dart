@@ -85,7 +85,7 @@ class VectorStore {
   VectorStore({
     AppDatabase? appDatabase,
     EmbeddingGenerator? embeddingGenerator,
-  })  : _appDatabase = appDatabase ?? AppDatabase(),
+  })  : _appDatabase = appDatabase ?? AppDatabase.instance,
         _embeddingGenerator =
             embeddingGenerator ?? MiniLmL6V2EmbeddingGenerator();
 

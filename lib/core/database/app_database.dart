@@ -8,6 +8,9 @@ import 'database_tables.dart';
 class AppDatabase {
   AppDatabase({this.customDatabasePath});
 
+  /// Shared singleton database provider for production runtime.
+  static final AppDatabase instance = AppDatabase();
+
   final String? customDatabasePath;
   Database? _db;
 

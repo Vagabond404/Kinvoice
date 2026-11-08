@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
 import 'package:record/record.dart';
+import '../services/recording_storage_service.dart';
 import '../utils/failure.dart';
 import '../utils/result.dart';
 import 'audio_capture_isolate.dart';
@@ -72,9 +73,10 @@ class AudioRecorderService {
       if (customPath != null) {
         _activeOutputPath = customPath;
       } else {
-        final dir = await getApplicationDocumentsDirectory();
+        final tempDir =
+            await RecordingStorageService.instance.getTempRecordingDirectory();
         final timestamp = DateTime.now().millisecondsSinceEpoch;
-        _activeOutputPath = '${dir.path}/recording_$timestamp.wav';
+        _activeOutputPath = p.join(tempDir.path, 'temp_recording_$timestamp.wav');
       }
 
       // Start the background worker isolate
